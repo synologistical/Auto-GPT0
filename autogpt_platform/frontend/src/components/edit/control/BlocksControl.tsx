@@ -1,8 +1,9 @@
-import React, { useState } from "react";
+import React, { useState, useCallback } from "react";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { TextRenderer } from "@/components/ui/render";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { beautifyString } from "@/lib/utils";
 import {
@@ -10,7 +11,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { Block } from "@/lib/autogpt-server-api";
+import { Block, BlockUIType, SpecialBlockID } from "@/lib/autogpt-server-api";
 import { MagnifyingGlassIcon, PlusIcon } from "@radix-ui/react-icons";
 import { IconToyBrick } from "@/components/ui/icons";
 import { getPrimaryCategoryColor } from "@/lib/utils";
@@ -19,11 +20,17 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { GraphMeta } from "@/lib/autogpt-server-api";
 
 interface BlocksControlProps {
   blocks: Block[];
-  addBlock: (id: string, name: string) => void;
+  addBlock: (
+    id: string,
+    name: string,
+    hardcodedValues: Record<string, any>,
+  ) => void;
   pinBlocksPopover: boolean;
+  flows: GraphMeta[];
 }
 
 /**
@@ -39,39 +46,69 @@ export const BlocksControl: React.FC<BlocksControlProps> = ({
   blocks,
   addBlock,
   pinBlocksPopover,
+  flows,
 }) => {
-  const blockList = blocks.sort((a, b) => a.name.localeCompare(b.name));
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
-  const [filteredBlocks, setFilteredBlocks] = useState<Block[]>(blockList);
+
+  const getFilteredBlockList = (): Block[] => {
+    const blockList = blocks
+      .filter((b) => b.uiType !== BlockUIType.AGENT)
+      .sort((a, b) => a.name.localeCompare(b.name));
+    const agentList = flows.map(
+      (flow) =>
+        ({
+          id: SpecialBlockID.AGENT,
+          name: flow.name,
+          description:
+            `Ver.${flow.version}` +
+            (flow.description ? ` | ${flow.description}` : ""),
+          categories: [{ category: "AGENT", description: "" }],
+          inputSchema: flow.input_schema,
+          outputSchema: flow.output_schema,
+          staticOutput: false,
+          uiType: BlockUIType.AGENT,
+          uiKey: flow.id,
+          costs: [],
+          hardcodedValues: {
+            graph_id: flow.id,
+            graph_version: flow.version,
+            input_schema: flow.input_schema,
+            output_schema: flow.output_schema,
+          },
+        }) as Block,
+    );
+
+    return blockList
+      .concat(agentList)
+      .filter(
+        (block: Block) =>
+          (block.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+            beautifyString(block.name)
+              .toLowerCase()
+              .includes(searchQuery.toLowerCase()) ||
+            block.description
+              .toLowerCase()
+              .includes(searchQuery.toLowerCase())) &&
+          (!selectedCategory ||
+            block.categories.some((cat) => cat.category === selectedCategory)),
+      );
+  };
 
   const resetFilters = React.useCallback(() => {
     setSearchQuery("");
     setSelectedCategory(null);
-    setFilteredBlocks(blockList);
-  }, [blockList]);
+  }, []);
 
   // Extract unique categories from blocks
   const categories = Array.from(
     new Set([
       null,
-      ...blocks.flatMap((block) => block.categories.map((cat) => cat.category)),
+      ...blocks
+        .flatMap((block) => block.categories.map((cat) => cat.category))
+        .sort(),
     ]),
   );
-
-  React.useEffect(() => {
-    setFilteredBlocks(
-      blockList.filter(
-        (block: Block) =>
-          (block.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-            beautifyString(block.name)
-              .toLowerCase()
-              .includes(searchQuery.toLowerCase())) &&
-          (!selectedCategory ||
-            block.categories.some((cat) => cat.category === selectedCategory)),
-      ),
-    );
-  }, [blockList, searchQuery, selectedCategory]);
 
   return (
     <Popover
@@ -147,15 +184,17 @@ export const BlocksControl: React.FC<BlocksControlProps> = ({
           </CardHeader>
           <CardContent className="overflow-scroll border-t p-0">
             <ScrollArea
-              className="h-[60vh] w-fit w-full"
+              className="h-[60vh]"
               data-id="blocks-control-scroll-area"
             >
-              {filteredBlocks.map((block) => (
+              {getFilteredBlockList().map((block) => (
                 <Card
-                  key={block.id}
+                  key={block.uiKey || block.id}
                   className="m-2 my-4 flex h-20 cursor-pointer shadow-none hover:shadow-lg"
                   data-id={`block-card-${block.id}`}
-                  onClick={() => addBlock(block.id, block.name)}
+                  onClick={() =>
+                    addBlock(block.id, block.name, block?.hardcodedValues || {})
+                  }
                 >
                   <div
                     className={`-ml-px h-full w-3 rounded-l-xl ${getPrimaryCategoryColor(block.categories)}`}
@@ -167,10 +206,19 @@ export const BlocksControl: React.FC<BlocksControlProps> = ({
                         className="block truncate pb-1 text-sm font-semibold"
                         data-id={`block-name-${block.id}`}
                       >
-                        {beautifyString(block.name).replace(/ Block$/, "")}
+                        <TextRenderer
+                          value={beautifyString(block.name).replace(
+                            / Block$/,
+                            "",
+                          )}
+                          truncateLengthLimit={45}
+                        />
                       </span>
-                      <span className="block break-words text-xs font-normal text-gray-500">
-                        {block.description}
+                      <span className="block break-all text-xs font-normal text-gray-500">
+                        <TextRenderer
+                          value={block.description}
+                          truncateLengthLimit={165}
+                        />
                       </span>
                     </div>
                     <div

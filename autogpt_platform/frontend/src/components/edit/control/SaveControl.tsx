@@ -80,7 +80,7 @@ export const SaveControl = ({
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [handleSave]);
+  }, [handleSave, toast]);
 
   return (
     <Popover open={pinSavePopover ? true : undefined}>
@@ -115,6 +115,7 @@ export const SaveControl = ({
                 value={agentName}
                 onChange={(e) => onNameChange(e.target.value)}
                 data-id="save-control-name-input"
+                maxLength={100}
               />
               <Label htmlFor="description">Description</Label>
               <Input
@@ -124,6 +125,7 @@ export const SaveControl = ({
                 value={agentDescription}
                 onChange={(e) => onDescriptionChange(e.target.value)}
                 data-id="save-control-description-input"
+                maxLength={500}
               />
               {agentMeta?.version && (
                 <>
