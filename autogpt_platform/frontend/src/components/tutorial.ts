@@ -112,7 +112,7 @@ export const startTutorial = (
   function handleMouseUp(event: { target: any }) {
     const target = event.target;
     const validConnectionPoint = document.querySelector(
-      '[data-id="custom-node-2"] [data-handlepos="left"]',
+      '[data-testid^="rf__node-"]:nth-child(2) [data-id$="-a-target"]',
     );
 
     if (validConnectionPoint && !validConnectionPoint.contains(target)) {
@@ -172,7 +172,7 @@ export const startTutorial = (
     text: "Please click the block button to open the blocks menu.",
     attachTo: {
       element: '[data-id="blocks-control-popover-trigger"]',
-      on: "bottom",
+      on: "right",
     },
     advanceOn: {
       selector: '[data-id="blocks-control-popover-trigger"]',
@@ -210,7 +210,7 @@ export const startTutorial = (
     id: "focus-new-block",
     title: "New Block",
     text: "This is the Calculator Block! Let's go over how it works.",
-    attachTo: { element: `[data-id="custom-node-1"]`, on: "top" },
+    attachTo: { element: `[data-id="custom-node-1"]`, on: "left" },
     beforeShowPromise: () => waitForElement('[data-id="custom-node-1"]'),
     buttons: [
       {
@@ -308,7 +308,7 @@ export const startTutorial = (
     text: "Enter a name for your agent, add an optional description, and then click 'Save agent' to save your flow.",
     attachTo: {
       element: '[data-id="save-control-popover-content"]',
-      on: "bottom",
+      on: "top",
     },
     buttons: [],
     beforeShowPromise: () =>
@@ -371,13 +371,14 @@ export const startTutorial = (
     id: "check-output",
     title: "Check the Output",
     text: "Check here to see the output of the block after running the flow.",
-    attachTo: { element: '[data-id="latest-output"]', on: "bottom" },
-    beforeShowPromise: () => waitForElement('[data-id="latest-output"]'),
+    attachTo: { element: '[data-id="latest-output"]', on: "top" },
+    beforeShowPromise: () =>
+      new Promise((resolve) => {
+        setTimeout(() => {
+          waitForElement('[data-id="latest-output"]').then(resolve);
+        }, 100);
+      }),
     buttons: [
-      {
-        text: "Back",
-        action: tour.back,
-      },
       {
         text: "Next",
         action: tour.next,
@@ -394,7 +395,7 @@ export const startTutorial = (
     id: "copy-paste-block",
     title: "Copy and Paste the Block",
     text: "Let’s duplicate this block. Click and hold the block with your mouse, then press Ctrl+C (Cmd+C on Mac) to copy and Ctrl+V (Cmd+V on Mac) to paste.",
-    attachTo: { element: '[data-id^="custom-node-"]', on: "top" },
+    attachTo: { element: '[data-testid^="rf__node-"]', on: "top" },
     buttons: [
       {
         text: "Back",
@@ -404,7 +405,7 @@ export const startTutorial = (
     when: {
       show: () => {
         fitViewToScreen();
-        waitForElement('[data-id="custom-node-2"]').then(() => {
+        waitForElement('[data-testid^="rf__node-"]:nth-child(2)').then(() => {
           tour.next();
         });
       },
@@ -415,9 +416,9 @@ export const startTutorial = (
     id: "focus-second-block",
     title: "Focus on the New Block",
     text: "This is your copied Calculator Block. Now, let’s move it to the side of the first block.",
-    attachTo: { element: `[data-id^="custom-node-"][data-id$="2"]`, on: "top" },
+    attachTo: { element: '[data-testid^="rf__node-"]:nth-child(2)', on: "top" },
     beforeShowPromise: () =>
-      waitForElement('[data-id^="custom-node-"][data-id$="2"]'),
+      waitForElement('[data-testid^="rf__node-"]:nth-child(2)'),
     buttons: [
       {
         text: "Next",
@@ -432,7 +433,7 @@ export const startTutorial = (
     text: "Now, let's connect the output of the first Calculator Block to the input of the second Calculator Block. Drag from the output pin of the first block to the input pin (A) of the second block.",
     attachTo: {
       element:
-        '[data-id^="1-"][data-id$="-result-source"]:not([data-id="1-2-result-source"])',
+        '[data-testid^="rf__node-"]:first-child [data-id$="-result-source"]',
       on: "bottom",
     },
 
@@ -444,8 +445,8 @@ export const startTutorial = (
     ],
     beforeShowPromise: () => {
       return waitForElement(
-        '[data-id^="1-"][data-id$="-result-source"]:not([data-id="1-2-result-source"])',
-      ).then(() => {});
+        '[data-testid^="rf__node-"]:first-child [data-id$="-result-source"]',
+      );
     },
     when: {
       show: () => {
@@ -453,7 +454,7 @@ export const startTutorial = (
         resetConnectionState(); // Reset state when revisiting this step
         tour.modal.show();
         const outputPin = document.querySelector(
-          '[data-id^="1-"][data-id$="-result-source"]:not([data-id="1-2-result-source"])',
+          '[data-testid^="rf__node-"]:first-child [data-id$="-result-source"]',
         );
         if (outputPin) {
           outputPin.addEventListener("mousedown", handleMouseDown);
@@ -461,7 +462,7 @@ export const startTutorial = (
       },
       hide: () => {
         const outputPin = document.querySelector(
-          '[data-id^="1-"][data-id$="-result-source"]:not([data-id="1-2-result-source"])',
+          '[data-testid^="rf__node-"]:first-child [data-id$="-result-source"]',
         );
         if (outputPin) {
           outputPin.removeEventListener("mousedown", handleMouseDown);
@@ -475,12 +476,14 @@ export const startTutorial = (
     title: "Connect the Blocks: Input",
     text: "Now, connect the output to the input pin of the second block (A).",
     attachTo: {
-      element: '[data-id="1-2-a-target"]',
+      element: '[data-testid^="rf__node-"]:nth-child(2) [data-id$="-a-target"]',
       on: "top",
     },
     buttons: [],
     beforeShowPromise: () => {
-      return waitForElement('[data-id="1-2-a-target"]').then(() => {
+      return waitForElement(
+        '[data-testid^="rf__node-"]:nth-child(2) [data-id$="-a-target"]',
+      ).then(() => {
         detectConnection();
       });
     },

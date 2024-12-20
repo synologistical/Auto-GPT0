@@ -41,6 +41,7 @@ export function getTypeTextColor(type: string | null): string {
     {
       string: "text-green-500",
       number: "text-blue-500",
+      integer: "text-blue-500",
       boolean: "text-yellow-500",
       object: "text-purple-500",
       array: "text-indigo-500",
@@ -58,6 +59,7 @@ export function getTypeBgColor(type: string | null): string {
     {
       string: "border-green-500",
       number: "border-blue-500",
+      integer: "border-blue-500",
       boolean: "border-yellow-500",
       object: "border-purple-500",
       array: "border-indigo-500",
@@ -74,6 +76,7 @@ export function getTypeColor(type: string | null): string {
     {
       string: "#22c55e",
       number: "#3b82f6",
+      integer: "#3b82f6",
       boolean: "#eab308",
       object: "#a855f7",
       array: "#6366f1",
@@ -106,6 +109,7 @@ const exceptionMap: Record<string, string> = {
   Http: "HTTP",
   Json: "JSON",
   Ai: "AI",
+  "You Tube": "YouTube",
 };
 
 const applyExceptions = (str: string): string => {
@@ -116,9 +120,28 @@ const applyExceptions = (str: string): string => {
   return str;
 };
 
+/** Recursively remove all "credentials" properties from exported JSON files */
+export function removeCredentials(obj: any) {
+  if (obj && typeof obj === "object") {
+    if (Array.isArray(obj)) {
+      obj.forEach((item) => removeCredentials(item));
+    } else {
+      delete obj.credentials;
+      Object.values(obj).forEach((value) => removeCredentials(value));
+    }
+  }
+  return obj;
+}
+
 export function exportAsJSONFile(obj: object, filename: string): void {
+  // Deep clone the object to avoid modifying the original
+  const sanitizedObj = JSON.parse(JSON.stringify(obj));
+
+  // Sanitize the object
+  removeCredentials(sanitizedObj);
+
   // Create downloadable blob
-  const jsonString = JSON.stringify(obj, null, 2);
+  const jsonString = JSON.stringify(sanitizedObj, null, 2);
   const blob = new Blob([jsonString], { type: "application/json" });
   const url = URL.createObjectURL(blob);
 
@@ -135,12 +158,34 @@ export function exportAsJSONFile(obj: object, filename: string): void {
 }
 
 export function setNestedProperty(obj: any, path: string, value: any) {
-  const keys = path.split(/[\/.]/); // Split by / or .
+  if (!obj || typeof obj !== "object") {
+    throw new Error("Target must be a non-null object");
+  }
+
+  if (!path || typeof path !== "string") {
+    throw new Error("Path must be a non-empty string");
+  }
+
+  const keys = path.split(/[\/.]/);
+
+  for (const key of keys) {
+    if (
+      !key ||
+      key === "__proto__" ||
+      key === "constructor" ||
+      key === "prototype"
+    ) {
+      throw new Error(`Invalid property name: ${key}`);
+    }
+  }
+
   let current = obj;
 
   for (let i = 0; i < keys.length - 1; i++) {
     const key = keys[i];
-    if (!current[key] || typeof current[key] !== "object") {
+    if (!current.hasOwnProperty(key)) {
+      current[key] = {};
+    } else if (typeof current[key] !== "object" || current[key] === null) {
       current[key] = {};
     }
     current = current[key];
@@ -179,22 +224,25 @@ export function removeEmptyStringsAndNulls(obj: any): any {
 }
 
 export const categoryColorMap: Record<string, string> = {
-  AI: "bg-orange-300",
-  SOCIAL: "bg-yellow-300",
-  TEXT: "bg-green-300",
-  SEARCH: "bg-blue-300",
-  BASIC: "bg-purple-300",
-  INPUT: "bg-cyan-300",
-  OUTPUT: "bg-red-300",
-  LOGIC: "bg-teal-300",
-  DEVELOPER_TOOLS: "bg-fuchsia-300",
+  AI: "bg-orange-300 dark:bg-orange-700",
+  SOCIAL: "bg-yellow-300 dark:bg-yellow-700",
+  TEXT: "bg-green-300 dark:bg-green-700",
+  SEARCH: "bg-blue-300 dark:bg-blue-700",
+  BASIC: "bg-purple-300 dark:bg-purple-700",
+  INPUT: "bg-cyan-300 dark:bg-cyan-700",
+  OUTPUT: "bg-red-300 dark:bg-red-700",
+  LOGIC: "bg-teal-300 dark:bg-teal-700",
+  DEVELOPER_TOOLS: "bg-fuchsia-300 dark:bg-fuchsia-700",
+  AGENT: "bg-lime-300 dark:bg-lime-700",
 };
 
 export function getPrimaryCategoryColor(categories: Category[]): string {
   if (categories.length === 0) {
-    return "bg-gray-300";
+    return "bg-gray-300 dark:bg-slate-700";
   }
-  return categoryColorMap[categories[0].category] || "bg-gray-300";
+  return (
+    categoryColorMap[categories[0].category] || "bg-gray-300 dark:bg-slate-700"
+  );
 }
 
 export function filterBlocksByType<T>(
@@ -288,4 +336,57 @@ export function findNewlyAddedBlockCoordinates(
     x: 0,
     y: 0,
   };
+}
+
+export function hasNonNullNonObjectValue(obj: any): boolean {
+  if (obj !== null && typeof obj === "object") {
+    return Object.values(obj).some((value) => hasNonNullNonObjectValue(value));
+  } else {
+    return obj !== null && typeof obj !== "object";
+  }
+}
+
+type ParsedKey = { key: string; index?: number };
+
+export function parseKeys(key: string): ParsedKey[] {
+  const splits = key.split(/_@_|_#_|_\$_|\./);
+  const keys: ParsedKey[] = [];
+  let currentKey: string | null = null;
+
+  splits.forEach((split) => {
+    const isInteger = /^\d+$/.test(split);
+    if (!isInteger) {
+      if (currentKey !== null) {
+        keys.push({ key: currentKey });
+      }
+      currentKey = split;
+    } else {
+      if (currentKey !== null) {
+        keys.push({ key: currentKey, index: parseInt(split, 10) });
+        currentKey = null;
+      } else {
+        throw new Error("Invalid key format: array index without a key");
+      }
+    }
+  });
+
+  if (currentKey !== null) {
+    keys.push({ key: currentKey });
+  }
+
+  return keys;
+}
+
+/**
+ * Get the value of a nested key in an object, handles arrays and objects.
+ */
+export function getValue(key: string, value: any) {
+  const keys = parseKeys(key);
+  return keys.reduce((acc, k) => {
+    if (acc === undefined) return undefined;
+    if (k.index !== undefined) {
+      return Array.isArray(acc[k.key]) ? acc[k.key][k.index] : undefined;
+    }
+    return acc[k.key];
+  }, value);
 }

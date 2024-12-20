@@ -1,8 +1,9 @@
 import { CustomEdge } from "@/components/CustomEdge";
 import { CustomNode } from "@/components/CustomNode";
-import AutoGPTServerAPI, {
+import BackendAPI, {
   Block,
   BlockIOSubSchema,
+  BlockUIType,
   Graph,
   Link,
   NodeExecutionResult,
@@ -17,23 +18,28 @@ import { Connection, MarkerType } from "@xyflow/react";
 import Ajv from "ajv";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
+import { useToast } from "@/components/ui/use-toast";
+import { InputItem } from "@/components/RunnerUIWrapper";
+import { GraphMeta } from "@/lib/autogpt-server-api";
 
 const ajv = new Ajv({ strict: false, allErrors: true });
 
 export default function useAgentGraph(
   flowID?: string,
-  template?: boolean,
   passDataToBeads?: boolean,
 ) {
+  const { toast } = useToast();
   const [router, searchParams, pathname] = [
     useRouter(),
     useSearchParams(),
     usePathname(),
   ];
+  const [isScheduling, setIsScheduling] = useState(false);
   const [savedAgent, setSavedAgent] = useState<Graph | null>(null);
   const [agentDescription, setAgentDescription] = useState<string>("");
   const [agentName, setAgentName] = useState<string>("");
   const [availableNodes, setAvailableNodes] = useState<Block[]>([]);
+  const [availableFlows, setAvailableFlows] = useState<GraphMeta[]>([]);
   const [updateQueue, setUpdateQueue] = useState<NodeExecutionResult[]>([]);
   const processedUpdates = useRef<NodeExecutionResult[]>([]);
   /**
@@ -68,7 +74,7 @@ export default function useAgentGraph(
   const [edges, setEdges] = useState<CustomEdge[]>([]);
 
   const api = useMemo(
-    () => new AutoGPTServerAPI(process.env.NEXT_PUBLIC_AGPT_SERVER_URL!),
+    () => new BackendAPI(process.env.NEXT_PUBLIC_AGPT_SERVER_URL!),
     [],
   );
 
@@ -91,11 +97,16 @@ export default function useAgentGraph(
     };
   }, [api]);
 
-  // Load available blocks
+  // Load available blocks & flows
   useEffect(() => {
     api
       .getBlocks()
       .then((blocks) => setAvailableNodes(blocks))
+      .catch();
+
+    api
+      .listGraphs()
+      .then((flows) => setAvailableFlows(flows))
       .catch();
   }, [api]);
 
@@ -116,7 +127,7 @@ export default function useAgentGraph(
       const outputSchema = node.data.outputSchema;
       if (!outputSchema) return "unknown";
 
-      const outputHandle = outputSchema.properties[handleId];
+      const outputHandle = outputSchema.properties[handleId] || {};
       if (!("type" in outputHandle)) return "unknown";
       return outputHandle.type;
     },
@@ -135,6 +146,12 @@ export default function useAgentGraph(
           const block = availableNodes.find(
             (block) => block.id === node.block_id,
           )!;
+          const flow =
+            block.uiType == BlockUIType.AGENT
+              ? availableFlows.find(
+                  (flow) => flow.id === node.input_default.graph_id,
+                )
+              : null;
           const newNode: CustomNode = {
             id: node.id,
             type: "custom",
@@ -144,7 +161,7 @@ export default function useAgentGraph(
             },
             data: {
               block_id: block.id,
-              blockType: block.name,
+              blockType: flow?.name || block.name,
               blockCosts: block.costs,
               categories: block.categories,
               description: block.description,
@@ -152,6 +169,7 @@ export default function useAgentGraph(
               inputSchema: block.inputSchema,
               outputSchema: block.outputSchema,
               hardcodedValues: node.input_default,
+              webhook: node.webhook,
               uiType: block.uiType,
               connections: graph.links
                 .filter((l) => [l.source_id, l.sink_id].includes(node.id))
@@ -198,7 +216,7 @@ export default function useAgentGraph(
         return newNodes;
       });
     },
-    [availableNodes, formatEdgeID, getOutputType],
+    [availableNodes, availableFlows, formatEdgeID, getOutputType],
   );
 
   const getFrontendId = useCallback(
@@ -268,6 +286,7 @@ export default function useAgentGraph(
 
   const updateNodesWithExecutionData = useCallback(
     (executionData: NodeExecutionResult) => {
+      if (!executionData.node_id) return;
       if (passDataToBeads) {
         updateEdgeBeads(executionData);
       }
@@ -313,13 +332,11 @@ export default function useAgentGraph(
   useEffect(() => {
     if (!flowID || availableNodes.length == 0) return;
 
-    (template ? api.getTemplate(flowID) : api.getGraph(flowID)).then(
-      (graph) => {
-        console.debug("Loading graph");
-        loadGraph(graph);
-      },
-    );
-  }, [flowID, template, availableNodes, api, loadGraph]);
+    api.getGraph(flowID).then((graph) => {
+      console.debug("Loading graph");
+      loadGraph(graph);
+    });
+  }, [flowID, availableNodes, api, loadGraph]);
 
   // Update nodes with execution data
   useEffect(() => {
@@ -342,15 +359,19 @@ export default function useAgentGraph(
     });
   }, [updateQueue, nodesSyncedWithSavedAgent, updateNodesWithExecutionData]);
 
-  const validateNodes = useCallback((): boolean => {
-    let isValid = true;
+  const validateNodes = useCallback((): string | null => {
+    let errorMessage = null;
 
     nodes.forEach((node) => {
       const validate = ajv.compile(node.data.inputSchema);
       const errors = {} as { [key: string]: string };
 
       // Validate values against schema using AJV
-      const valid = validate(node.data.hardcodedValues);
+      const inputData =
+        node.data.uiType === BlockUIType.AGENT
+          ? node.data.hardcodedValues?.data || {}
+          : node.data.hardcodedValues || {};
+      const valid = validate(inputData);
       if (!valid) {
         // Populate errors if validation fails
         validate.errors?.forEach((error) => {
@@ -368,7 +389,7 @@ export default function useAgentGraph(
             return;
           }
           console.warn("Error", error);
-          isValid = false;
+          errorMessage = error.message || "Invalid input";
           if (path && error.message) {
             const key = path.slice(1);
             console.log("Error", key, error.message);
@@ -383,6 +404,54 @@ export default function useAgentGraph(
           }
         });
       }
+
+      Object.entries(node.data.inputSchema.properties || {}).forEach(
+        ([key, schema]) => {
+          if (schema.depends_on) {
+            const dependencies = schema.depends_on;
+
+            // Check if dependent field has value
+            const hasValue =
+              inputData[key] != null ||
+              ("default" in schema && schema.default != null);
+
+            const mustHaveValue = node.data.inputSchema.required?.includes(key);
+
+            // Check for missing dependencies when dependent field is present
+            const missingDependencies = dependencies.filter(
+              (dep) =>
+                !inputData[dep as keyof typeof inputData] ||
+                String(inputData[dep as keyof typeof inputData]).trim() === "",
+            );
+
+            if ((hasValue || mustHaveValue) && missingDependencies.length > 0) {
+              setNestedProperty(
+                errors,
+                key,
+                `Requires ${missingDependencies.join(", ")} to be set`,
+              );
+              errorMessage = `Field ${key} requires ${missingDependencies.join(", ")} to be set`;
+            }
+
+            // Check if field is required when dependencies are present
+            const hasAllDependencies = dependencies.every(
+              (dep) =>
+                inputData[dep as keyof typeof inputData] &&
+                String(inputData[dep as keyof typeof inputData]).trim() !== "",
+            );
+
+            if (hasAllDependencies && !hasValue) {
+              setNestedProperty(
+                errors,
+                key,
+                `${key} is required when ${dependencies.join(", ")} are set`,
+              );
+              errorMessage = `${key} is required when ${dependencies.join(", ")} are set`;
+            }
+          }
+        },
+      );
+
       // Set errors
       setNodes((nodes) => {
         return nodes.map((n) => {
@@ -400,7 +469,7 @@ export default function useAgentGraph(
       });
     });
 
-    return isValid;
+    return errorMessage;
   }, [nodes]);
 
   // Handle user requests
@@ -413,10 +482,25 @@ export default function useAgentGraph(
     if (saveRunRequest.state === "error") {
       if (saveRunRequest.request === "save") {
         console.error("Error saving agent");
+        toast({
+          variant: "destructive",
+          title: `Error saving agent`,
+          duration: 2000,
+        });
       } else if (saveRunRequest.request === "run") {
+        toast({
+          variant: "destructive",
+          title: `Error saving&running agent`,
+          duration: 2000,
+        });
         console.error(`Error saving&running agent`);
       } else if (saveRunRequest.request === "stop") {
         console.error(`Error stopping agent`);
+        toast({
+          variant: "destructive",
+          title: `Error stopping agent`,
+          duration: 2000,
+        });
       }
       // Reset request
       setSaveRunRequest({
@@ -439,8 +523,14 @@ export default function useAgentGraph(
         });
         // If run was requested, run the agent
       } else if (saveRunRequest.request === "run") {
-        if (!validateNodes()) {
+        const validationError = validateNodes();
+        if (validationError) {
           console.error("Validation failed; aborting run");
+          toast({
+            title: `Validation failed: ${validationError}`,
+            variant: "destructive",
+            duration: 2000,
+          });
           setSaveRunRequest({
             request: "none",
             state: "none",
@@ -485,7 +575,16 @@ export default function useAgentGraph(
               },
             );
           })
-          .catch(() => setSaveRunRequest({ request: "run", state: "error" }));
+          .catch((error) => {
+            const errorMessage =
+              error instanceof Error ? error.message : String(error);
+            toast({
+              variant: "destructive",
+              title: "Error saving agent",
+              description: errorMessage,
+            });
+            setSaveRunRequest({ request: "run", state: "error" });
+          });
 
         processedUpdates.current = processedUpdates.current = [];
       }
@@ -508,6 +607,7 @@ export default function useAgentGraph(
     }
   }, [
     api,
+    toast,
     saveRunRequest,
     savedAgent,
     nodesSyncedWithSavedAgent,
@@ -588,185 +688,192 @@ export default function useAgentGraph(
     [availableNodes],
   );
 
-  const saveAgent = useCallback(
-    async (asTemplate: boolean = false) => {
-      //FIXME frontend ids should be resolved better (e.g. returned from the server)
-      // currently this relays on block_id and position
-      const blockIdToNodeIdMap: Record<string, string> = {};
+  const _saveAgent = useCallback(async () => {
+    //FIXME frontend ids should be resolved better (e.g. returned from the server)
+    // currently this relays on block_id and position
+    const blockIdToNodeIdMap: Record<string, string> = {};
 
-      nodes.forEach((node) => {
-        const key = `${node.data.block_id}_${node.position.x}_${node.position.y}`;
-        blockIdToNodeIdMap[key] = node.id;
-      });
+    nodes.forEach((node) => {
+      const key = `${node.data.block_id}_${node.position.x}_${node.position.y}`;
+      blockIdToNodeIdMap[key] = node.id;
+    });
 
-      const formattedNodes = nodes.map((node) => {
-        const inputDefault = prepareNodeInputData(node);
-        const inputNodes = edges
-          .filter((edge) => edge.target === node.id)
-          .map((edge) => ({
-            name: edge.targetHandle || "",
-            node_id: edge.source,
-          }));
-
-        const outputNodes = edges
-          .filter((edge) => edge.source === node.id)
-          .map((edge) => ({
-            name: edge.sourceHandle || "",
-            node_id: edge.target,
-          }));
-
-        return {
-          id: node.id,
-          block_id: node.data.block_id,
-          input_default: inputDefault,
-          input_nodes: inputNodes,
-          output_nodes: outputNodes,
-          data: {
-            ...node.data,
-            hardcodedValues: removeEmptyStringsAndNulls(
-              node.data.hardcodedValues,
-            ),
-          },
-          metadata: { position: node.position },
-        };
-      });
-
-      const links = edges.map((edge) => ({
-        source_id: edge.source,
-        sink_id: edge.target,
-        source_name: edge.sourceHandle || "",
-        sink_name: edge.targetHandle || "",
-      }));
-
-      const payload = {
-        id: savedAgent?.id!,
-        name: agentName || "Agent Name",
-        description: agentDescription || "Agent Description",
-        nodes: formattedNodes,
-        links: links,
-      };
-
-      // To avoid saving the same graph, we compare the payload with the saved agent.
-      // Differences in IDs are ignored.
-      const comparedPayload = {
-        ...(({ id, ...rest }) => rest)(payload),
-        nodes: payload.nodes.map(
-          ({ id, data, input_nodes, output_nodes, ...rest }) => rest,
-        ),
-        links: payload.links.map(({ source_id, sink_id, ...rest }) => rest),
-      };
-      const comparedSavedAgent = {
-        name: savedAgent?.name,
-        description: savedAgent?.description,
-        nodes: savedAgent?.nodes.map((v) => ({
-          block_id: v.block_id,
-          input_default: v.input_default,
-          metadata: v.metadata,
-        })),
-        links: savedAgent?.links.map((v) => ({
-          sink_name: v.sink_name,
-          source_name: v.source_name,
-        })),
-      };
-
-      let newSavedAgent = null;
-      if (savedAgent && deepEquals(comparedPayload, comparedSavedAgent)) {
-        console.warn("No need to save: Graph is the same as version on server");
-        newSavedAgent = savedAgent;
-      } else {
-        console.debug(
-          "Saving new Graph version; old vs new:",
-          comparedPayload,
-          payload,
-        );
-        setNodesSyncedWithSavedAgent(false);
-
-        newSavedAgent = savedAgent
-          ? await (savedAgent.is_template
-              ? api.updateTemplate(savedAgent.id, payload)
-              : api.updateGraph(savedAgent.id, payload))
-          : await (asTemplate
-              ? api.createTemplate(payload)
-              : api.createGraph(payload));
-
-        console.debug("Response from the API:", newSavedAgent);
-      }
-
-      // Route the URL to the new flow ID if it's a new agent.
-      if (!savedAgent) {
-        const path = new URLSearchParams(searchParams);
-        path.set("flowID", newSavedAgent.id);
-        router.push(`${pathname}?${path.toString()}`);
-        return;
-      }
-
-      // Update the node IDs on the frontend
-      setSavedAgent(newSavedAgent);
-      setNodes((prev) => {
-        return newSavedAgent.nodes
-          .map((backendNode) => {
-            const key = `${backendNode.block_id}_${backendNode.metadata.position.x}_${backendNode.metadata.position.y}`;
-            const frontendNodeId = blockIdToNodeIdMap[key];
-            const frontendNode = prev.find(
-              (node) => node.id === frontendNodeId,
-            );
-
-            return frontendNode
-              ? {
-                  ...frontendNode,
-                  position: backendNode.metadata.position,
-                  data: {
-                    ...frontendNode.data,
-                    hardcodedValues: removeEmptyStringsAndNulls(
-                      frontendNode.data.hardcodedValues,
-                    ),
-                    status: undefined,
-                    backend_id: backendNode.id,
-                    executionResults: [],
-                  },
-                }
-              : null;
-          })
-          .filter((node) => node !== null);
-      });
-      // Reset bead count
-      setEdges((edges) => {
-        return edges.map((edge) => ({
-          ...edge,
-          data: {
-            ...edge.data,
-            edgeColor: edge.data?.edgeColor!,
-            beadUp: 0,
-            beadDown: 0,
-            beadData: [],
-          },
+    const formattedNodes = nodes.map((node) => {
+      const inputDefault = prepareNodeInputData(node);
+      const inputNodes = edges
+        .filter((edge) => edge.target === node.id)
+        .map((edge) => ({
+          name: edge.targetHandle || "",
+          node_id: edge.source,
         }));
-      });
-    },
-    [
-      api,
-      nodes,
-      edges,
-      pathname,
-      router,
-      searchParams,
-      savedAgent,
-      agentName,
-      agentDescription,
-      prepareNodeInputData,
-    ],
-  );
 
-  const requestSave = useCallback(
-    (asTemplate: boolean) => {
-      saveAgent(asTemplate);
-      setSaveRunRequest({
-        request: "save",
-        state: "saving",
+      const outputNodes = edges
+        .filter((edge) => edge.source === node.id)
+        .map((edge) => ({
+          name: edge.sourceHandle || "",
+          node_id: edge.target,
+        }));
+
+      return {
+        id: node.id,
+        block_id: node.data.block_id,
+        input_default: inputDefault,
+        input_nodes: inputNodes,
+        output_nodes: outputNodes,
+        data: {
+          ...node.data,
+          hardcodedValues: removeEmptyStringsAndNulls(
+            node.data.hardcodedValues,
+          ),
+        },
+        metadata: { position: node.position },
+      };
+    });
+
+    const links = edges.map((edge) => ({
+      source_id: edge.source,
+      sink_id: edge.target,
+      source_name: edge.sourceHandle || "",
+      sink_name: edge.targetHandle || "",
+    }));
+
+    const payload = {
+      id: savedAgent?.id!,
+      name: agentName || `New Agent ${new Date().toISOString()}`,
+      description: agentDescription || "",
+      nodes: formattedNodes,
+      links: links,
+    };
+
+    // To avoid saving the same graph, we compare the payload with the saved agent.
+    // Differences in IDs are ignored.
+    const comparedPayload = {
+      ...(({ id, ...rest }) => rest)(payload),
+      nodes: payload.nodes.map(
+        ({ id, data, input_nodes, output_nodes, ...rest }) => rest,
+      ),
+      links: payload.links.map(({ source_id, sink_id, ...rest }) => rest),
+    };
+    const comparedSavedAgent = {
+      name: savedAgent?.name,
+      description: savedAgent?.description,
+      nodes: savedAgent?.nodes.map((v) => ({
+        block_id: v.block_id,
+        input_default: v.input_default,
+        metadata: v.metadata,
+      })),
+      links: savedAgent?.links.map((v) => ({
+        sink_name: v.sink_name,
+        source_name: v.source_name,
+      })),
+    };
+
+    let newSavedAgent = null;
+    if (savedAgent && deepEquals(comparedPayload, comparedSavedAgent)) {
+      console.warn("No need to save: Graph is the same as version on server");
+      newSavedAgent = savedAgent;
+    } else {
+      console.debug(
+        "Saving new Graph version; old vs new:",
+        comparedPayload,
+        payload,
+      );
+      setNodesSyncedWithSavedAgent(false);
+
+      newSavedAgent = savedAgent
+        ? await api.updateGraph(savedAgent.id, payload)
+        : await api.createGraph(payload);
+
+      console.debug("Response from the API:", newSavedAgent);
+    }
+
+    // Route the URL to the new flow ID if it's a new agent.
+    if (!savedAgent) {
+      const path = new URLSearchParams(searchParams);
+      path.set("flowID", newSavedAgent.id);
+      router.push(`${pathname}?${path.toString()}`);
+      return;
+    }
+
+    // Update the node IDs on the frontend
+    setSavedAgent(newSavedAgent);
+    setNodes((prev) => {
+      return newSavedAgent.nodes
+        .map((backendNode) => {
+          const key = `${backendNode.block_id}_${backendNode.metadata.position.x}_${backendNode.metadata.position.y}`;
+          const frontendNodeId = blockIdToNodeIdMap[key];
+          const frontendNode = prev.find((node) => node.id === frontendNodeId);
+
+          return frontendNode
+            ? {
+                ...frontendNode,
+                position: backendNode.metadata.position,
+                data: {
+                  ...frontendNode.data,
+                  hardcodedValues: removeEmptyStringsAndNulls(
+                    frontendNode.data.hardcodedValues,
+                  ),
+                  status: undefined,
+                  backend_id: backendNode.id,
+                  webhook: backendNode.webhook,
+                  executionResults: [],
+                },
+              }
+            : null;
+        })
+        .filter((node) => node !== null);
+    });
+    // Reset bead count
+    setEdges((edges) => {
+      return edges.map((edge) => ({
+        ...edge,
+        data: {
+          ...edge.data,
+          edgeColor: edge.data?.edgeColor!,
+          beadUp: 0,
+          beadDown: 0,
+          beadData: [],
+        },
+      }));
+    });
+  }, [
+    api,
+    nodes,
+    edges,
+    pathname,
+    router,
+    searchParams,
+    savedAgent,
+    agentName,
+    agentDescription,
+    prepareNodeInputData,
+  ]);
+
+  const saveAgent = useCallback(async () => {
+    try {
+      await _saveAgent();
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      console.error("Error saving agent", error);
+      toast({
+        variant: "destructive",
+        title: "Error saving agent",
+        description: errorMessage,
       });
-    },
-    [saveAgent],
-  );
+    }
+  }, [_saveAgent, toast]);
+
+  const requestSave = useCallback(() => {
+    if (saveRunRequest.state !== "none") {
+      return;
+    }
+    saveAgent();
+    setSaveRunRequest({
+      request: "save",
+      state: "saving",
+    });
+  }, [saveAgent]);
 
   const requestSaveAndRun = useCallback(() => {
     saveAgent();
@@ -793,6 +900,46 @@ export default function useAgentGraph(
     }));
   }, [saveRunRequest]);
 
+  // runs after saving cron expression and inputs (if exists)
+  const scheduleRunner = useCallback(
+    async (cronExpression: string, inputs: InputItem[]) => {
+      await saveAgent();
+      try {
+        if (flowID) {
+          await api.createSchedule({
+            graph_id: flowID,
+            cron: cronExpression,
+            input_data: inputs.reduce(
+              (acc, input) => ({
+                ...acc,
+                [input.hardcodedValues.name]: input.hardcodedValues.value,
+              }),
+              {},
+            ),
+          });
+          toast({
+            title: "Agent scheduling successful",
+          });
+
+          // if scheduling is done from the monitor page, then redirect to monitor page after successful scheduling
+          if (searchParams.get("open_scheduling") === "true") {
+            router.push("/");
+          }
+        } else {
+          return;
+        }
+      } catch (error) {
+        console.log(error);
+        toast({
+          variant: "destructive",
+          title: "Error scheduling agent",
+          description: "Please retry",
+        });
+      }
+    },
+    [api, flowID, saveAgent, toast, router, searchParams],
+  );
+
   return {
     agentName,
     setAgentName,
@@ -800,13 +947,17 @@ export default function useAgentGraph(
     setAgentDescription,
     savedAgent,
     availableNodes,
+    availableFlows,
     getOutputType,
     requestSave,
     requestSaveAndRun,
     requestStopRun,
+    scheduleRunner,
     isSaving: saveRunRequest.state == "saving",
     isRunning: saveRunRequest.state == "running",
     isStopping: saveRunRequest.state == "stopping",
+    isScheduling,
+    setIsScheduling,
     nodes,
     setNodes,
     edges,

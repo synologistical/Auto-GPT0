@@ -25,7 +25,9 @@ export type Block = {
   outputSchema: BlockIORootSchema;
   staticOutput: boolean;
   uiType: BlockUIType;
+  uiKey?: string;
   costs: BlockCost[];
+  hardcodedValues: { [key: string]: any } | null;
 };
 
 export type BlockIORootSchema = {
@@ -54,6 +56,8 @@ export type BlockIOSubSchemaMeta = {
   description?: string;
   placeholder?: string;
   advanced?: boolean;
+  depends_on?: string[];
+  hidden?: boolean;
 };
 
 export type BlockIOObjectSubSchema = BlockIOSubSchemaMeta & {
@@ -80,6 +84,7 @@ export type BlockIOStringSubSchema = BlockIOSubSchemaMeta & {
   enum?: string[];
   secret?: true;
   default?: string;
+  format?: string;
 };
 
 export type BlockIONumberSubSchema = BlockIOSubSchemaMeta & {
@@ -95,12 +100,45 @@ export type BlockIOBooleanSubSchema = BlockIOSubSchemaMeta & {
 export type CredentialsType = "api_key" | "oauth2";
 
 // --8<-- [start:BlockIOCredentialsSubSchema]
+export const PROVIDER_NAMES = {
+  ANTHROPIC: "anthropic",
+  D_ID: "d_id",
+  DISCORD: "discord",
+  E2B: "e2b",
+  GITHUB: "github",
+  GOOGLE: "google",
+  GOOGLE_MAPS: "google_maps",
+  GROQ: "groq",
+  IDEOGRAM: "ideogram",
+  JINA: "jina",
+  MEDIUM: "medium",
+  NOTION: "notion",
+  OLLAMA: "ollama",
+  OPENAI: "openai",
+  OPENWEATHERMAP: "openweathermap",
+  OPEN_ROUTER: "open_router",
+  PINECONE: "pinecone",
+  SLANT3D: "slant3d",
+  REPLICATE: "replicate",
+  FAL: "fal",
+  REVID: "revid",
+  UNREAL_SPEECH: "unreal_speech",
+  EXA: "exa",
+  HUBSPOT: "hubspot",
+} as const;
+// --8<-- [end:BlockIOCredentialsSubSchema]
+
+export type CredentialsProviderName =
+  (typeof PROVIDER_NAMES)[keyof typeof PROVIDER_NAMES];
+
 export type BlockIOCredentialsSubSchema = BlockIOSubSchemaMeta & {
-  credentials_provider: "github" | "google" | "notion";
+  /* Mirror of backend/data/model.py:CredentialsFieldSchemaExtra */
+  credentials_provider: CredentialsProviderName[];
   credentials_scopes?: string[];
   credentials_types: Array<CredentialsType>;
+  discriminator?: string;
+  discriminator_mapping?: { [key: string]: CredentialsProviderName };
 };
-// --8<-- [end:BlockIOCredentialsSubSchema]
 
 export type BlockIONullSubSchema = BlockIOSubSchemaMeta & {
   type: "null";
@@ -134,6 +172,7 @@ export type Node = {
     position: { x: number; y: number };
     [key: string]: any;
   };
+  webhook?: Webhook;
 };
 
 /* Mirror of backend/data/graph.py:Link */
@@ -150,28 +189,26 @@ export type LinkCreatable = Omit<Link, "id" | "is_static"> & {
   id?: string;
 };
 
-/* Mirror of autogpt_server/data/graph.py:ExecutionMeta */
-export type ExecutionMeta = {
+/* Mirror of backend/data/graph.py:GraphExecution */
+export type GraphExecution = {
   execution_id: string;
   started_at: number;
   ended_at: number;
   duration: number;
   total_run_time: number;
-  status: "running" | "waiting" | "success" | "failed";
+  status: "INCOMPLETE" | "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED";
+  graph_id: string;
+  graph_version: number;
 };
 
-/* Mirror of backend/data/graph.py:GraphMeta */
 export type GraphMeta = {
   id: string;
   version: number;
   is_active: boolean;
-  is_template: boolean;
   name: string;
   description: string;
-};
-
-export type GraphMetaWithRuns = GraphMeta & {
-  executions: ExecutionMeta[];
+  input_schema: BlockIOObjectSubSchema;
+  output_schema: BlockIOObjectSubSchema;
 };
 
 /* Mirror of backend/data/graph.py:Graph */
@@ -182,12 +219,13 @@ export type Graph = GraphMeta & {
 
 export type GraphUpdateable = Omit<
   Graph,
-  "version" | "is_active" | "is_template" | "links"
+  "version" | "is_active" | "links" | "input_schema" | "output_schema"
 > & {
   version?: number;
   is_active?: boolean;
-  is_template?: boolean;
   links: Array<LinkCreatable>;
+  input_schema?: BlockIOObjectSubSchema;
+  output_schema?: BlockIOObjectSubSchema;
 };
 
 export type GraphCreatable = Omit<GraphUpdateable, "id"> & { id?: string };
@@ -202,11 +240,12 @@ export type GraphExecuteResponse = {
 
 /* Mirror of backend/data/execution.py:ExecutionResult */
 export type NodeExecutionResult = {
-  graph_exec_id: string;
-  node_exec_id: string;
   graph_id: string;
   graph_version: number;
+  graph_exec_id: string;
+  node_exec_id: string;
   node_id: string;
+  block_id: string;
   status: "INCOMPLETE" | "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED";
   input_data: { [key: string]: any };
   output_data: { [key: string]: Array<any> };
@@ -219,6 +258,7 @@ export type NodeExecutionResult = {
 /* Mirror of backend/server/integrations/router.py:CredentialsMetaResponse */
 export type CredentialsMetaResponse = {
   id: string;
+  provider: CredentialsProviderName;
   type: CredentialsType;
   title?: string;
   scopes?: Array<string>;
@@ -231,6 +271,13 @@ export type CredentialsDeleteResponse = {
   revoked: boolean | null;
 };
 
+/* Mirror of backend/server/integrations/router.py:CredentialsDeletionNeedsConfirmationResponse */
+export type CredentialsDeleteNeedConfirmationResponse = {
+  deleted: false;
+  need_confirmation: true;
+  message: string;
+};
+
 /* Mirror of backend/data/model.py:CredentialsMetaInput */
 export type CredentialsMetaInput = {
   id: string;
@@ -239,15 +286,15 @@ export type CredentialsMetaInput = {
   provider: string;
 };
 
-/* Mirror of autogpt_libs/supabase_integration_credentials_store/types.py:_BaseCredentials */
+/* Mirror of backend/backend/data/model.py:_BaseCredentials */
 type BaseCredentials = {
   id: string;
   type: CredentialsType;
   title?: string;
-  provider: string;
+  provider: CredentialsProviderName;
 };
 
-/* Mirror of autogpt_libs/supabase_integration_credentials_store/types.py:OAuth2Credentials */
+/* Mirror of backend/backend/data/model.py:OAuth2Credentials */
 export type OAuth2Credentials = BaseCredentials & {
   type: "oauth2";
   scopes: string[];
@@ -259,12 +306,26 @@ export type OAuth2Credentials = BaseCredentials & {
   metadata: Record<string, any>;
 };
 
-/* Mirror of autogpt_libs/supabase_integration_credentials_store/types.py:APIKeyCredentials */
+/* Mirror of backend/backend/data/model.py:APIKeyCredentials */
 export type APIKeyCredentials = BaseCredentials & {
   type: "api_key";
   title: string;
   api_key: string;
   expires_at?: number;
+};
+
+/* Mirror of backend/data/integrations.py:Webhook */
+type Webhook = {
+  id: string;
+  url: string;
+  provider: CredentialsProviderName;
+  credentials_id: string;
+  webhook_type: string;
+  resource?: string;
+  events: string[];
+  secret: string;
+  config: Record<string, any>;
+  provider_webhook_id?: string;
 };
 
 export type User = {
@@ -277,6 +338,15 @@ export enum BlockUIType {
   INPUT = "Input",
   OUTPUT = "Output",
   NOTE = "Note",
+  WEBHOOK = "Webhook",
+  WEBHOOK_MANUAL = "Webhook (manual)",
+  AGENT = "Agent",
+}
+
+export enum SpecialBlockID {
+  AGENT = "e189baac-8c20-45a1-94a7-55177ea42565",
+  INPUT = "c0a8e994-ebf1-4a9c-a4d8-89d09c86741b",
+  OUTPUT = "363ae599-353e-4804-937e-b2ee3cef3da4",
 }
 
 export type AnalyticsMetrics = {
@@ -289,4 +359,150 @@ export type AnalyticsDetails = {
   type: string;
   data: { [key: string]: any };
   index: string;
+};
+
+export type Pagination = {
+  total_items: number;
+  total_pages: number;
+  current_page: number;
+  page_size: number;
+};
+
+export type StoreAgent = {
+  slug: string;
+  agent_name: string;
+  agent_image: string;
+  creator: string;
+  creator_avatar: string;
+  sub_heading: string;
+  description: string;
+  runs: number;
+  rating: number;
+};
+
+export type StoreAgentsResponse = {
+  agents: StoreAgent[];
+  pagination: Pagination;
+};
+
+export type StoreAgentDetails = {
+  store_listing_version_id: string;
+  slug: string;
+  updated_at: string;
+  agent_name: string;
+  agent_video: string;
+  agent_image: string[];
+  creator: string;
+  creator_avatar: string;
+  sub_heading: string;
+  description: string;
+  categories: string[];
+  runs: number;
+  rating: number;
+  versions: string[];
+};
+
+export type Creator = {
+  name: string;
+  username: string;
+  description: string;
+  avatar_url: string;
+  num_agents: number;
+  agent_rating: number;
+  agent_runs: number;
+};
+
+export type CreatorsResponse = {
+  creators: Creator[];
+  pagination: Pagination;
+};
+
+export type CreatorDetails = {
+  name: string;
+  username: string;
+  description: string;
+  links: string[];
+  avatar_url: string;
+  agent_rating: number;
+  agent_runs: number;
+  top_categories: string[];
+};
+
+export type StoreSubmission = {
+  agent_id: string;
+  agent_version: number;
+  name: string;
+  sub_heading: string;
+  description: string;
+  image_urls: string[];
+  date_submitted: string;
+  status: string;
+  runs: number;
+  rating: number;
+};
+
+export type StoreSubmissionsResponse = {
+  submissions: StoreSubmission[];
+  pagination: Pagination;
+};
+
+export type StoreSubmissionRequest = {
+  agent_id: string;
+  agent_version: number;
+  slug: string;
+  name: string;
+  sub_heading: string;
+  video_url?: string;
+  image_urls: string[];
+  description: string;
+  categories: string[];
+};
+
+export type ProfileDetails = {
+  name: string;
+  username: string;
+  description: string;
+  links: string[];
+  avatar_url: string;
+};
+
+export type Schedule = {
+  id: string;
+  name: string;
+  cron: string;
+  user_id: string;
+  graph_id: string;
+  graph_version: number;
+  input_data: { [key: string]: any };
+  next_run_time: string;
+};
+
+export type ScheduleCreatable = {
+  cron: string;
+  graph_id: string;
+  input_data: { [key: string]: any };
+};
+
+export type MyAgent = {
+  agent_id: string;
+  agent_version: number;
+  agent_name: string;
+  last_edited: string;
+  description: string;
+};
+
+export type MyAgentsResponse = {
+  agents: MyAgent[];
+  pagination: Pagination;
+};
+
+export type StoreReview = {
+  score: number;
+  comments?: string;
+};
+
+export type StoreReviewCreate = {
+  store_listing_version_id: string;
+  score: number;
+  comments?: string;
 };
